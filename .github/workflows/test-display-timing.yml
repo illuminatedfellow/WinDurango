@@ -1,0 +1,76 @@
+# Fork-only verification workflow for the frame-statistics / VLine fix. Not part of the upstream PR.
+name: Test display timing
+
+on:
+  push:
+    branches: [ "test/display-timing" ]
+
+jobs:
+  test:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache Windows SDK
+      id: cache-winsdk
+      uses: actions/cache@v5
+      with:
+        path: C:\Program Files (x86)\Windows Kits\10
+        key: windows-sdk-28000
+
+    - uses: ChristopheLav/windows-sdk-install@v1
+      if: steps.cache-winsdk.outputs.cache-hit != 'true'
+      with:
+        version-sdk: 28000
+        features: 'OptionId.UWPCPP,OptionId.DesktopCPParm64'
+
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        sdk: 10.0.28000.0
+
+    # Fast feedback first: the helper tests need only the header.
+    - name: Build DisplayTiming test
+      run: |
+          New-Item -ItemType Directory -Force -Path build
+          cl /nologo /EHsc /std:c++20 /W4 /I projects\WinDurango.D3D11X\include\WinDurango.D3D11X tests\display_timing\test_display_timing.cpp user32.lib dxgi.lib /Fe:build\test_display_timing.exe
+
+    - name: Run DisplayTiming test (helpers)
+      shell: pwsh
+      run: |
+          $p = Start-Process -FilePath (Resolve-Path build\test_display_timing.exe) -NoNewWindow -PassThru `
+                 -RedirectStandardOutput build\dt-out.txt -RedirectStandardError build\dt-err.txt
+          $null = $p.Handle  # keep the handle so ExitCode is populated
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); Get-Content build\dt-out.txt; throw "Test timed out" }
+          Get-Content build\dt-out.txt; Get-Content build\dt-err.txt
+          if ($p.ExitCode -ne 0) { throw "Test failed with exit code $($p.ExitCode)" }
+
+    - name: Install VCPkg Packages
+      uses: lukka/run-vcpkg@v11
+
+    - name: Configure CMake
+      run: |
+          cd build
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          cd ../
+
+    - name: Build WinDurango
+      run: cmake --build build --config Release
+
+    - name: Run DisplayTiming test (exports)
+      shell: pwsh
+      run: |
+          # d3d11_x.dll's DllMain reads .\EmbeddedXvd\Windows\System32\combase.dll for its version;
+          # without it, it shows a blocking MessageBox.
+          $run = New-Item -ItemType Directory -Force -Path build\dt-run
+          $sys = New-Item -ItemType Directory -Force -Path "$run\EmbeddedXvd\Windows\System32"
+          Copy-Item C:\Windows\System32\combase.dll $sys
+          $bin = (Resolve-Path build\bin\Release).Path
+          $p = Start-Process -FilePath (Resolve-Path build\test_display_timing.exe) -ArgumentList "`"$bin`"" `
+                 -WorkingDirectory $run -NoNewWindow -PassThru `
+                 -RedirectStandardOutput "$run\out.txt" -RedirectStandardError "$run\err.txt"
+          $null = $p.Handle
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); Get-Content "$run\out.txt"; throw "Test timed out (likely a blocking MessageBox/stub)" }
+          Get-Content "$run\out.txt"; Get-Content "$run\err.txt"
+          if ($p.ExitCode -ne 0) { throw "Test failed with exit code $($p.ExitCode)" }
