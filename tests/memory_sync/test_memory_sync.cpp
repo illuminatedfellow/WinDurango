@@ -65,7 +65,7 @@ static void TestCompare()
     // The context masks the loaded value before comparing: (*p & Mask) <func> Ref.
     uint32_t Word = 0xABCD0012u;
     CHECK(Compare(D3D11_COMPARISON_EQUAL, Load32(&Word) & 0xFFu, 0x12u), "masked EQUAL ignores upper bits");
-    CHECK(!Compare(D3D11_COMPARISON_EQUAL, Load32(&Word) & 0xFFFFu, 0x12u), "mask keeps bits it covers");
+    CHECK(!Compare(D3D11_COMPARISON_EQUAL, Load32(&Word) & 0x00FF00FFu, 0x12u), "mask keeps bits it covers");
 }
 
 static void TestLoads()
