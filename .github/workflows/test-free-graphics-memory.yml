@@ -1,0 +1,79 @@
+# Fork-only verification workflow for the D3DFreeGraphicsMemory fix. Not part of the upstream PR.
+name: Test D3DFreeGraphicsMemory
+
+on:
+  push:
+    branches: [ "test/free-graphics-memory" ]
+
+jobs:
+  test:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache Windows SDK
+      id: cache-winsdk
+      uses: actions/cache@v5
+      with:
+        path: C:\Program Files (x86)\Windows Kits\10
+        key: windows-sdk-28000
+
+    - uses: ChristopheLav/windows-sdk-install@v1
+      if: steps.cache-winsdk.outputs.cache-hit != 'true'
+      with:
+        version-sdk: 28000
+        features: 'OptionId.UWPCPP,OptionId.DesktopCPParm64'
+
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        sdk: 10.0.28000.0
+
+    - name: Install VCPkg Packages
+      uses: lukka/run-vcpkg@v11
+
+    - name: Configure CMake
+      run: |
+          New-Item -ItemType Directory -Force -Path build
+          cd build
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          cd ../
+
+    - name: Build WinDurango
+      run: cmake --build build --config Release
+
+    - name: Check d3d11_x.dll imports VirtualAlloc/VirtualFree from kernelx.dll
+      shell: pwsh
+      run: |
+          $lines = dumpbin /nologo /imports build\bin\Release\d3d11_x.dll
+          $section = ''
+          $hits = @{}
+          foreach ($l in $lines) {
+            if ($l -match '^\s{4}(\S+\.dll)\s*$') { $section = $Matches[1].ToLower(); continue }
+            if ($l -match '\s(VirtualAlloc|VirtualFree)\s*$') { $hits[$Matches[1]] = $section }
+          }
+          $hits.GetEnumerator() | ForEach-Object { "{0} -> {1}" -f $_.Key, $_.Value }
+          if ($hits['VirtualAlloc'] -ne 'kernelx.dll' -or $hits['VirtualFree'] -ne 'kernelx.dll') {
+            throw "VirtualAlloc/VirtualFree are not both imported from kernelx.dll"
+          }
+
+    - name: Build test
+      run: cl /nologo /EHsc /std:c++20 /W4 tests\free_graphics_memory\test_free_graphics_memory.cpp /Fe:build\test_fgm.exe
+
+    - name: Run test
+      shell: pwsh
+      run: |
+          # d3d11_x.dll's DllMain reads .\EmbeddedXvd\Windows\System32\combase.dll for its version;
+          # without it, it shows a blocking MessageBox.
+          $run = New-Item -ItemType Directory -Force -Path build\fgm-run
+          $sys = New-Item -ItemType Directory -Force -Path "$run\EmbeddedXvd\Windows\System32"
+          Copy-Item C:\Windows\System32\combase.dll $sys
+          $bin = (Resolve-Path build\bin\Release).Path
+          $p = Start-Process -FilePath (Resolve-Path build\test_fgm.exe) -ArgumentList "`"$bin`"" `
+                 -WorkingDirectory $run -NoNewWindow -PassThru `
+                 -RedirectStandardOutput "$run\out.txt" -RedirectStandardError "$run\err.txt"
+          $null = $p.Handle  # keep the handle so ExitCode is populated
+          if (-not $p.WaitForExit(180000)) { $p.Kill(); Get-Content "$run\out.txt"; throw "Test timed out (likely a blocking MessageBox/stub)" }
+          Get-Content "$run\out.txt"; Get-Content "$run\err.txt"
+          if ($p.ExitCode -ne 0) { throw "Test failed with exit code $($p.ExitCode)" }
