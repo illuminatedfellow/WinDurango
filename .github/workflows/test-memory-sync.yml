@@ -1,0 +1,61 @@
+# Fork-only verification workflow for the GPU memory-sync fix. Not part of the upstream PR.
+name: Test memory sync
+
+on:
+  push:
+    branches: [ "test/memory-sync" ]
+
+jobs:
+  test:
+    runs-on: windows-2025-vs2026
+    timeout-minutes: 90
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Cache Windows SDK
+      id: cache-winsdk
+      uses: actions/cache@v5
+      with:
+        path: C:\Program Files (x86)\Windows Kits\10
+        key: windows-sdk-28000
+
+    - uses: ChristopheLav/windows-sdk-install@v1
+      if: steps.cache-winsdk.outputs.cache-hit != 'true'
+      with:
+        version-sdk: 28000
+        features: 'OptionId.UWPCPP,OptionId.DesktopCPParm64'
+
+    - uses: ilammy/msvc-dev-cmd@v1
+      with:
+        sdk: 10.0.28000.0
+
+    # Fast feedback first: the helper test needs only the header, not the full build.
+    - name: Build MemorySync test
+      run: |
+          New-Item -ItemType Directory -Force -Path build
+          cl /nologo /EHsc /std:c++20 /W4 /I projects\WinDurango.D3D11X\include\WinDurango.D3D11X tests\memory_sync\test_memory_sync.cpp /Fe:build\test_memory_sync.exe
+
+    - name: Run MemorySync test
+      shell: pwsh
+      run: |
+          $p = Start-Process -FilePath (Resolve-Path build\test_memory_sync.exe) -NoNewWindow -PassThru `
+                 -RedirectStandardOutput build\ms-out.txt -RedirectStandardError build\ms-err.txt
+          $null = $p.Handle  # keep the handle so ExitCode is populated
+          if (-not $p.WaitForExit(120000)) { $p.Kill(); Get-Content build\ms-out.txt; throw "Test timed out" }
+          Get-Content build\ms-out.txt; Get-Content build\ms-err.txt
+          if ($p.ExitCode -ne 0) { throw "Test failed with exit code $($p.ExitCode)" }
+
+    # Then prove the real change compiles and links.
+    - name: Install VCPkg Packages
+      uses: lukka/run-vcpkg@v11
+
+    - name: Configure CMake
+      run: |
+          cd build
+          cmake .. -DCMAKE_TOOLCHAIN_FILE=${{ github.workspace }}/vcpkg/scripts/buildsystems/vcpkg.cmake
+          cd ../
+
+    - name: Build WinDurango
+      run: cmake --build build --config Release
+
